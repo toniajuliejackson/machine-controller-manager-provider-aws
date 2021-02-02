@@ -2,8 +2,8 @@ package helpers
 
 import (
 	mcmClientset "github.com/gardener/machine-controller-manager/pkg/client/clientset/versioned"
+
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -14,7 +14,7 @@ type Cluster struct {
 	restConfig          *rest.Config
 	clientset           *kubernetes.Clientset
 	apiextensionsClient *apiextensionsclientset.Clientset
-	mcmClient           *mcmClientset.Clientset
+	McmClient           *mcmClientset.Clientset
 }
 
 // FillClientSets checks whether the cluster is accessible and returns an error if not
@@ -32,16 +32,9 @@ func (c *Cluster) FillClientSets() error {
 		}
 		mcmClient, err := mcmClientset.NewForConfig(c.restConfig)
 		if err == nil {
-			c.mcmClient = mcmClient
+			c.McmClient = mcmClient
 		}
 	}
-	return err
-}
-
-//ProbeNodes tries to probe for nodes. Indirectly it checks whether the cluster is accessible.
-// If not accessible, then it returns an error
-func (c *Cluster) ProbeNodes() error {
-	_, err := c.clientset.CoreV1().Nodes().List(metav1.ListOptions{})
 	return err
 }
 
@@ -57,9 +50,4 @@ func NewCluster(kubeConfigPath string) (c *Cluster, e error) {
 	}
 
 	return c, err
-}
-
-// GetClientset returns a Clientset
-func (c *Cluster) GetClientset() (k *kubernetes.Clientset) {
-	return c.clientset
 }
