@@ -8,3 +8,4 @@ bin/
 dev/
 .test
 test/integration/controller/github*
+.vscode

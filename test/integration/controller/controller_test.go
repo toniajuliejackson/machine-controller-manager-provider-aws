@@ -31,16 +31,21 @@
 package controller_test
 
 import (
+	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gardener/machine-controller-manager-provider-aws/test/integration/helpers"
 	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/config"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -53,6 +58,10 @@ var (
 	targetKubeCluster     *helpers.Cluster
 	numberOfBgProcesses   int16
 	mcmRepoPath           = "../../../dev/mcm"
+	ctx, cancelFunc       = context.WithCancel(context.Background())
+	wg                    sync.WaitGroup // prevents race condition between main and other goroutines exit
+	mcm_logFile           = "/tmp/integration-test-mcm.log"
+	mc_logFile            = "/tmp/integration-test-mc.log"
 )
 
 var _ = Describe("Machine Resource", func() {
@@ -70,13 +79,14 @@ var _ = Describe("Machine Resource", func() {
 		By("Fetching kubernetes/crds and applying them into control cluster")
 		Expect(applyCrds()).To(BeNil())
 		By("Starting Machine Controller Manager")
-		Expect(startMachineControllerManager()).To(BeNil())
+		Expect(startMachineControllerManager(ctx)).To(BeNil())
 		By("Starting Machine Controller")
-		Expect(startMachineController()).To(BeNil())
+		Expect(startMachineController(ctx)).To(BeNil())
 		By("Parsing cloud-provider-secret file and applying")
 		Expect(applyCloudProviderSecret()).To(BeNil())
 		By("Applying MachineClass")
 		Expect(applyMachineClass()).To(BeNil())
+		config.DefaultReporterConfig.SlowSpecThreshold = float64(300 * time.Second)
 	})
 	BeforeEach(func() {
 		By("Check the number of goroutines running are 2")
@@ -268,6 +278,19 @@ var _ = Describe("Machine Resource", func() {
 			})
 		})
 	})
+	AfterSuite(func() {
+		if controlKubeCluster.McmClient != nil {
+			controlKubeCluster.McmClient.MachineV1alpha1().MachineDeployments("default").Delete("test-machine-deployment", &metav1.DeleteOptions{})
+			controlKubeCluster.McmClient.MachineV1alpha1().Machines("default").Delete("test1-machine1", &metav1.DeleteOptions{})
+		}
+		<-time.After(3 * time.Second)
+		log.Println("Initiating gorouting cancel via context done")
+
+		cancelFunc()
+
+		log.Println("Terminating processes")
+		wg.Wait()
+	})
 
 })
 
@@ -345,7 +368,7 @@ func applyCrds() error {
 	return nil
 }
 
-func startMachineControllerManager() error {
+func startMachineControllerManager(ctx context.Context) error {
 	/*
 		 TO-DO: startMachineControllerManager starts the machine controller manager
 			 - if mcmContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
@@ -355,7 +378,8 @@ func startMachineControllerManager() error {
 	command := fmt.Sprintf("make start CONTROL_KUBECONFIG=%s TARGET_KUBECONFIG=%s", controlKubeConfigPath, targetKubeConfigPath)
 	log.Println("starting MachineControllerManager with command: ", command)
 	dst_path := fmt.Sprintf("%s", mcmRepoPath)
-	go execCommandAsRoutine(command, dst_path)
+	wg.Add(1)
+	go execCommandAsRoutine(ctx, command, dst_path, mcm_logFile)
 	return nil
 
 	// TO-DO: Below error is appearing occasionally - We should avoid it
@@ -389,7 +413,7 @@ func startMachineControllerManager() error {
 	*/
 }
 
-func startMachineController() error {
+func startMachineController(ctx context.Context) error {
 	/*
 		 TO-DO: startMachineController starts the machine controller
 			 - if mcContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
@@ -397,7 +421,8 @@ func startMachineController() error {
 	*/
 	command := fmt.Sprintf("make start CONTROL_KUBECONFIG=%s TARGET_KUBECONFIG=%s", controlKubeConfigPath, targetKubeConfigPath)
 	log.Println("starting MachineController with command: ", command)
-	go execCommandAsRoutine(command, "../../..")
+	wg.Add(1)
+	go execCommandAsRoutine(ctx, command, "../../..", mc_logFile)
 	return nil
 }
 
@@ -467,20 +492,43 @@ func applyFiles(filePath string) error {
 	return nil
 }
 
-func execCommandAsRoutine(cmd string, dir string) {
+func execCommandAsRoutine(ctx context.Context, cmd string, dir string, logFile string) {
+	numberOfBgProcesses++
+	args := strings.Fields(cmd)
+
+	command := exec.CommandContext(ctx, args[0], args[1:]...)
+	outputFile, err := os.Create(logFile)
+
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err != nil {
+		log.Printf("failed creating file: %s", err)
+	}
+
 	defer func() {
 		numberOfBgProcesses = numberOfBgProcesses - 1
+
+		log.Println("Terminating goroutine")
+		wg.Done()
+		outputFile.Close()
 	}()
-	numberOfBgProcesses++
-	log.Println("Goroutine started")
-	args := strings.Fields(cmd)
-	command := exec.Command(args[0], args[1:]...)
+
 	command.Dir = dir
-	out, err := command.CombinedOutput()
+	command.Stdout = outputFile
+	command.Stderr = outputFile
+	log.Println("Goroutine started")
+
+	err = command.Run()
 	if err != nil {
-		log.Println("Error is ", err)
-		log.Printf("output is %s\n ", out)
-	} else {
-		log.Printf("output is %s\n ", out)
+		log.Println("command Run failed", err)
 	}
+	// pgid, err := syscall.Getpgid(command.Process.Pid)
+	// if err == nil {
+	// 	syscall.Kill(-pgid, 15) // note the minus sign
+	// }
+	data, err := ioutil.ReadFile(logFile)
+	if err != nil {
+		log.Printf("failed reading data from file: %s", err)
+	}
+	log.Printf("\n -------- %s ---------- \n %s \n ", logFile, data)
 }
