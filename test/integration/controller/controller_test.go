@@ -266,14 +266,13 @@ var _ = Describe("Machine Resource", func() {
 	// Testcase #03 | Orphaned Resources
 	Describe("Check for orphaned resources", func() {
 		Context("In target cluster", func() {
-			Context("Check if there are any VMs matching the tag exists", func() {
-				It("Should list any orphaned VMs if available", func() {
-					// if available should delete orphaned VMs in cloud provider
-				})
-			})
-			Context("Check if there are any disks matching the tag exists", func() {
-				It("Should list any orphaned disks if available", func() {
-					// if available should delete orphaned disks in cloud provider
+			Context("Check if there are any resources matching the tag exists", func() {
+				It("Should list any orphaned resources if available", func() {
+					// if available should delete orphaned resources in cloud provider
+					err := helpers.CheckForOrphanedResources()
+
+					//Check there is no error occured
+					Expect(err).NotTo(HaveOccurred())
 				})
 			})
 		})
