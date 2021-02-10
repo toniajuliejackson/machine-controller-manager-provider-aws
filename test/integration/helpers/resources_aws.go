@@ -16,19 +16,46 @@ package helpers
 **/
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	v1 "k8s.io/api/core/v1"
+
+	api "github.com/gardener/machine-controller-manager-provider-aws/pkg/aws/apis"
+	"github.com/gardener/machine-controller-manager-provider-aws/pkg/spi"
+	v1alpha1 "github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
 )
 
 var _ aws.Config
 
+func newSession(machineClass *v1alpha1.MachineClass, secret *v1.Secret) *session.Session {
+
+	var (
+		providerSpec *api.AWSProviderSpec
+		sPI          spi.PluginSPIImpl
+	)
+
+	err := json.Unmarshal([]byte(machineClass.ProviderSpec.Raw), &providerSpec)
+	if err != nil {
+		providerSpec = nil
+		log.Printf("Error occured while performing unmarshal %s", err.Error())
+	}
+	sess, err := sPI.NewSession(secret, providerSpec.Region)
+	if err != nil {
+		log.Printf("Error occured while creating new session %s", err)
+	}
+	return sess
+}
+
 // DescribeInstancesWithTag describes the instance with the specified tag
-func DescribeInstancesWithTag(tagName string, tagValue string) error {
-	svc := ec2.New(session.New())
+func DescribeInstancesWithTag(tagName string, tagValue string, machineClass *v1alpha1.MachineClass, secret *v1.Secret) error {
+	sess := newSession(machineClass, secret)
+	svc := ec2.New(sess)
 	input := &ec2.DescribeInstancesInput{
 		Filters: []*ec2.Filter{
 			{
@@ -52,17 +79,16 @@ func DescribeInstancesWithTag(tagName string, tagValue string) error {
 			// Message from an error.
 			return err
 		}
-		return err
 	}
 
 	for _, reservation := range result.Reservations {
 		for _, instance := range reservation.Instances {
 			fmt.Println(*instance.InstanceId)
 			// describe volumes attached to instance & delete them
-			DescribeVolumesAttached(*instance.InstanceId)
+			//DescribeVolumesAttached(*instance.InstanceId)
 
 			// terminate the instance
-			TerminateInstance(*instance.InstanceId)
+			//TerminateInstance(*instance.InstanceId)
 		}
 	}
 	return nil
@@ -89,7 +115,6 @@ func TerminateInstance(instanceID string) error {
 			// Message from an error.
 			return err
 		}
-		return err
 	}
 
 	fmt.Println(result)
@@ -97,8 +122,9 @@ func TerminateInstance(instanceID string) error {
 }
 
 // DescribeAvailableVolumes describes volumes with the specified tag
-func DescribeAvailableVolumes() error {
-	svc := ec2.New(session.New())
+func DescribeAvailableVolumes(machineClass *v1alpha1.MachineClass, secret *v1.Secret) error {
+	sess := newSession(machineClass, secret)
+	svc := ec2.New(sess)
 	input := &ec2.DescribeVolumesInput{
 		Filters: []*ec2.Filter{
 			{
@@ -122,7 +148,6 @@ func DescribeAvailableVolumes() error {
 			// Message from an error.
 			return err
 		}
-		return err
 	}
 
 	for _, volume := range result.Volumes {
@@ -167,14 +192,13 @@ func DescribeVolumesAttached(InstanceID string) error {
 			// Message from an error.
 			return err
 		}
-		return err
 	}
 
 	for _, volume := range result.Volumes {
 		fmt.Println(*volume.VolumeId)
 
 		// delete the volume
-		DeleteVolume(*volume.VolumeId)
+		//DeleteVolume(*volume.VolumeId)
 	}
 
 	return nil
@@ -201,9 +225,8 @@ func DeleteVolume(VolumeID string) error {
 			// Message from an error.
 			return err
 		}
-		return err
 	}
 
 	fmt.Println(result)
-	return nil 
+	return nil
 }

@@ -77,15 +77,15 @@ var _ = Describe("Machine Resource", func() {
 		By("Checking for the clusters if provided are available")
 		Expect(prepareClusters()).To(BeNil())
 		By("Fetching kubernetes/crds and applying them into control cluster")
-		Expect(applyCrds()).To(BeNil())
+		//Expect(applyCrds()).To(BeNil())
 		By("Starting Machine Controller Manager")
 		Expect(startMachineControllerManager(ctx)).To(BeNil())
 		By("Starting Machine Controller")
 		Expect(startMachineController(ctx)).To(BeNil())
 		By("Parsing cloud-provider-secret file and applying")
-		Expect(applyCloudProviderSecret()).To(BeNil())
+		//Expect(applyCloudProviderSecret()).To(BeNil())
 		By("Applying MachineClass")
-		Expect(applyMachineClass()).To(BeNil())
+		//Expect(applyMachineClass()).To(BeNil())
 		config.DefaultReporterConfig.SlowSpecThreshold = float64(300 * time.Second)
 	})
 	BeforeEach(func() {
@@ -269,9 +269,16 @@ var _ = Describe("Machine Resource", func() {
 			Context("Check if there are any resources matching the tag exists", func() {
 				It("Should list any orphaned resources if available", func() {
 					// if available should delete orphaned resources in cloud provider
-					err := helpers.CheckForOrphanedResources()
-
-					//Check there is no error occured
+					machineClass, err := controlKubeCluster.McmClient.MachineV1alpha1().MachineClasses("default").Get("test-mc", metav1.GetOptions{})
+					if err == nil {
+						secret, err := controlKubeCluster.Clientset.CoreV1().Secrets(machineClass.SecretRef.Namespace).Get(machineClass.SecretRef.Name, metav1.GetOptions{})
+						if err == nil {
+							err := helpers.CheckForOrphanedResources(machineClass, secret)
+							//Check there is no error occured
+							Expect(err).NotTo(HaveOccurred())
+						}
+						Expect(err).NotTo(HaveOccurred())
+					}
 					Expect(err).NotTo(HaveOccurred())
 				})
 			})

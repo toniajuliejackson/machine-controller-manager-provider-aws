@@ -7,5 +7,5 @@ bin/
 .idea
 dev/
 .test
-test/integration/controller/github*
+test/integration/controller/report*
 .vscode

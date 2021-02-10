@@ -8,13 +8,13 @@ import (
 //ProbeNodes tries to probe for nodes. Indirectly it checks whether the cluster is accessible.
 // If not accessible, then it returns an error
 func (c *Cluster) ProbeNodes() error {
-	_, err := c.clientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	_, err := c.Clientset.CoreV1().Nodes().List(metav1.ListOptions{})
 	return err
 }
 
 //getNodes tries to retrieve the list of node objects in the cluster.
 func (c *Cluster) getNodes() (*v1.NodeList, error) {
-	nodes, err := c.clientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodes, err := c.Clientset.CoreV1().Nodes().List(metav1.ListOptions{})
 	return nodes, err
 }
 
