@@ -32,6 +32,7 @@ providerSpec:
     worker.garden.sapcloud.io/group: worker-brisb
     worker.gardener.cloud/pool: worker-brisb
     worker.gardener.cloud/system-components: "true"
+    mcm-integration-test: "true"
 secretRef: # If required
   name: shoot--mcm-test--jakeer-aws-worker-brisb-z1-f94f9
   namespace: default # Namespace where the controller would watch

@@ -12,7 +12,7 @@ import (
 //Cluster type to hold cluster specific details
 type Cluster struct {
 	restConfig          *rest.Config
-	clientset           *kubernetes.Clientset
+	Clientset           *kubernetes.Clientset
 	apiextensionsClient *apiextensionsclientset.Clientset
 	McmClient           *mcmClientset.Clientset
 }
@@ -21,7 +21,7 @@ type Cluster struct {
 func (c *Cluster) FillClientSets() error {
 	clientset, err := kubernetes.NewForConfig(c.restConfig)
 	if err == nil {
-		c.clientset = clientset
+		c.Clientset = clientset
 		err = c.ProbeNodes()
 		if err != nil {
 			return err

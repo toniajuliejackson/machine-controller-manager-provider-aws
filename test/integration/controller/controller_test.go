@@ -31,15 +31,21 @@
 package controller_test
 
 import (
+	"context"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gardener/machine-controller-manager-provider-aws/test/integration/helpers"
 	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/config"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -52,6 +58,10 @@ var (
 	targetKubeCluster     *helpers.Cluster
 	numberOfBgProcesses   int16
 	mcmRepoPath           = "../../../dev/mcm"
+	ctx, cancelFunc       = context.WithCancel(context.Background())
+	wg                    sync.WaitGroup // prevents race condition between main and other goroutines exit
+	mcm_logFile           = "/tmp/integration-test-mcm.log"
+	mc_logFile            = "/tmp/integration-test-mc.log"
 )
 
 var _ = Describe("Machine Resource", func() {
@@ -63,18 +73,20 @@ var _ = Describe("Machine Resource", func() {
 		- apply secret resource for accesing the cloud provider service in the control cluster
 		- Create machineclass resource from file available in kubernetes directory of provider specific repo in control cluster
 		*/
+		log.SetOutput(GinkgoWriter)
 		By("Checking for the clusters if provided are available")
 		Expect(prepareClusters()).To(BeNil())
 		By("Fetching kubernetes/crds and applying them into control cluster")
 		Expect(applyCrds()).To(BeNil())
 		By("Starting Machine Controller Manager")
-		Expect(startMachineControllerManager()).To(BeNil())
+		Expect(startMachineControllerManager(ctx)).To(BeNil())
 		By("Starting Machine Controller")
-		Expect(startMachineController()).To(BeNil())
+		Expect(startMachineController(ctx)).To(BeNil())
 		By("Parsing cloud-provider-secret file and applying")
 		Expect(applyCloudProviderSecret()).To(BeNil())
 		By("Applying MachineClass")
 		Expect(applyMachineClass()).To(BeNil())
+		config.DefaultReporterConfig.SlowSpecThreshold = float64(300 * time.Second)
 	})
 	BeforeEach(func() {
 		By("Check the number of goroutines running are 2")
@@ -97,7 +109,7 @@ var _ = Describe("Machine Resource", func() {
 				//fmt.Println("wait for 30 sec before probing for nodes")
 			})
 			It("should list existing +1 nodes in target cluster", func() {
-				fmt.Println("Wait until a new node is added. Number of nodes should be ", initialNodes+1)
+				log.Println("Wait until a new node is added. Number of nodes should be ", initialNodes+1)
 				// check whether there is one node more
 				Eventually(targetKubeCluster.NumberOfReadyNodes, 300, 5).Should(BeNumerically("==", initialNodes+1))
 			})
@@ -166,7 +178,7 @@ var _ = Describe("Machine Resource", func() {
 					Expect(controlKubeCluster.ApplyYamlFile("../../../kubernetes/machine-deployment.yaml")).To(BeNil())
 				})
 				It("should correctly list existing nodes +3 in target cluster", func() {
-					fmt.Println("Wait until new nodes are added. Number of nodes should be ", initialNodes+3)
+					log.Println("Wait until new nodes are added. Number of nodes should be ", initialNodes+3)
 
 					// check whether all the expected nodes are ready
 					Eventually(targetKubeCluster.NumberOfReadyNodes, 180, 5).Should(BeNumerically("==", initialNodes+3))
@@ -180,7 +192,7 @@ var _ = Describe("Machine Resource", func() {
 					Expect(err).NotTo(HaveOccurred())
 				})
 				It("should correctly list existing nodes +6 in target cluster", func() {
-					fmt.Println("Wait until new nodes are added. Number of nodes should be ", initialNodes+6)
+					log.Println("Wait until new nodes are added. Number of nodes should be ", initialNodes+6)
 
 					// check whether all the expected nodes are ready
 					Eventually(targetKubeCluster.NumberOfReadyNodes, 180, 5).Should(BeNumerically("==", initialNodes+6))
@@ -254,17 +266,36 @@ var _ = Describe("Machine Resource", func() {
 	// Testcase #03 | Orphaned Resources
 	Describe("Check for orphaned resources", func() {
 		Context("In target cluster", func() {
-			Context("Check if there are any VMs matching the tag exists", func() {
-				It("Should list any orphaned VMs if available", func() {
-					// if available should delete orphaned VMs in cloud provider
-				})
-			})
-			Context("Check if there are any disks matching the tag exists", func() {
-				It("Should list any orphaned disks if available", func() {
-					// if available should delete orphaned disks in cloud provider
+			Context("Check if there are any resources matching the tag exists", func() {
+				It("Should list any orphaned resources if available", func() {
+					// if available should delete orphaned resources in cloud provider
+					machineClass, err := controlKubeCluster.McmClient.MachineV1alpha1().MachineClasses("default").Get("test-mc", metav1.GetOptions{})
+					if err == nil {
+						secret, err := controlKubeCluster.Clientset.CoreV1().Secrets(machineClass.SecretRef.Namespace).Get(machineClass.SecretRef.Name, metav1.GetOptions{})
+						if err == nil {
+							err := helpers.CheckForOrphanedResources(machineClass, secret)
+							//Check there is no error occured
+							Expect(err).NotTo(HaveOccurred())
+						}
+						Expect(err).NotTo(HaveOccurred())
+					}
+					Expect(err).NotTo(HaveOccurred())
 				})
 			})
 		})
+	})
+	AfterSuite(func() {
+		if controlKubeCluster.McmClient != nil {
+			controlKubeCluster.McmClient.MachineV1alpha1().MachineDeployments("default").Delete("test-machine-deployment", &metav1.DeleteOptions{})
+			controlKubeCluster.McmClient.MachineV1alpha1().Machines("default").Delete("test1-machine1", &metav1.DeleteOptions{})
+		}
+		<-time.After(3 * time.Second)
+		log.Println("Initiating gorouting cancel via context done")
+
+		cancelFunc()
+
+		log.Println("Terminating processes")
+		wg.Wait()
 	})
 
 })
@@ -276,15 +307,15 @@ func prepareClusters() error {
 	- It should return an error if thre is a error
 	*/
 
-	fmt.Printf("Secret is %s\n", cloudProviderSecret)
-	fmt.Printf("Control path is %s\n", controlKubeConfigPath)
-	fmt.Printf("Target path is %s\n", targetKubeConfigPath)
+	log.Printf("Secret is %s\n", cloudProviderSecret)
+	log.Printf("Control path is %s\n", controlKubeConfigPath)
+	log.Printf("Target path is %s\n", targetKubeConfigPath)
 	if controlKubeConfigPath != "" {
 		controlKubeConfigPath, _ = filepath.Abs(controlKubeConfigPath)
 		// if control cluster config is available but not the target, then set control and target clusters as same
 		if targetKubeConfigPath == "" {
 			targetKubeConfigPath = controlKubeConfigPath
-			fmt.Println("Missing targetKubeConfig. control cluster will be set as target too")
+			log.Println("Missing targetKubeConfig. control cluster will be set as target too")
 		}
 		targetKubeConfigPath, _ = filepath.Abs(targetKubeConfigPath)
 		// use the current context in controlkubeconfig
@@ -301,13 +332,13 @@ func prepareClusters() error {
 		// update clientset and check whether the cluster is accessible
 		err = controlKubeCluster.FillClientSets()
 		if err != nil {
-			fmt.Println("Failed to check nodes in the cluster")
+			log.Println("Failed to check nodes in the cluster")
 			return err
 		}
 
 		err = targetKubeCluster.FillClientSets()
 		if err != nil {
-			fmt.Println("Failed to check nodes in the cluster")
+			log.Println("Failed to check nodes in the cluster")
 			return err
 		}
 	} else if targetKubeConfigPath != "" {
@@ -343,7 +374,7 @@ func applyCrds() error {
 	return nil
 }
 
-func startMachineControllerManager() error {
+func startMachineControllerManager(ctx context.Context) error {
 	/*
 		 TO-DO: startMachineControllerManager starts the machine controller manager
 			 - if mcmContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
@@ -351,9 +382,10 @@ func startMachineControllerManager() error {
 				 clone the required repo and then use make
 	*/
 	command := fmt.Sprintf("make start CONTROL_KUBECONFIG=%s TARGET_KUBECONFIG=%s", controlKubeConfigPath, targetKubeConfigPath)
-	fmt.Println("starting MachineControllerManager with command: ", command)
+	log.Println("starting MachineControllerManager with command: ", command)
 	dst_path := fmt.Sprintf("%s", mcmRepoPath)
-	go execCommandAsRoutine(command, dst_path)
+	wg.Add(1)
+	go execCommandAsRoutine(ctx, command, dst_path, mcm_logFile)
 	return nil
 
 	// TO-DO: Below error is appearing occasionally - We should avoid it
@@ -387,15 +419,16 @@ func startMachineControllerManager() error {
 	*/
 }
 
-func startMachineController() error {
+func startMachineController(ctx context.Context) error {
 	/*
 		 TO-DO: startMachineController starts the machine controller
 			 - if mcContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
 			 - if mcContainerImage is empty, runs machine controller locally
 	*/
 	command := fmt.Sprintf("make start CONTROL_KUBECONFIG=%s TARGET_KUBECONFIG=%s", controlKubeConfigPath, targetKubeConfigPath)
-	fmt.Println("starting MachineController with command: ", command)
-	go execCommandAsRoutine(command, "../../..")
+	log.Println("starting MachineController with command: ", command)
+	wg.Add(1)
+	go execCommandAsRoutine(ctx, command, "../../..", mc_logFile)
 	return nil
 }
 
@@ -432,26 +465,26 @@ func applyFiles(filePath string) error {
 	}
 
 	for _, file := range files {
-		fmt.Println(file)
+		log.Println(file)
 		fi, err := os.Stat(file)
 		if err != nil {
-			fmt.Println("\nError file does not exist!")
+			log.Println("\nError file does not exist!")
 			return err
 		}
 
 		switch mode := fi.Mode(); {
 		case mode.IsDir():
 			// do directory stuff
-			fmt.Printf("\n%s is a directory. Therefore nothing will happen!\n", file)
+			log.Printf("\n%s is a directory. Therefore nothing will happen!\n", file)
 		case mode.IsRegular():
 			// do file stuff
-			fmt.Printf("\n%s is a file. Therefore applying yaml ...", file)
+			log.Printf("\n%s is a file. Therefore applying yaml ...", file)
 			err := controlKubeCluster.ApplyYamlFile(file)
 			if err != nil {
 				if strings.Contains(err.Error(), "already exists") {
-					fmt.Printf("\n%s already exists, so skipping ...\n", file)
+					log.Printf("\n%s already exists, so skipping ...\n", file)
 				} else {
-					fmt.Printf("\nFailed to create machine class %s, in the cluster.\n", file)
+					log.Printf("\nFailed to create machine class %s, in the cluster.\n", file)
 					return err
 				}
 
@@ -465,20 +498,43 @@ func applyFiles(filePath string) error {
 	return nil
 }
 
-func execCommandAsRoutine(cmd string, dir string) {
+func execCommandAsRoutine(ctx context.Context, cmd string, dir string, logFile string) {
+	numberOfBgProcesses++
+	args := strings.Fields(cmd)
+
+	command := exec.CommandContext(ctx, args[0], args[1:]...)
+	outputFile, err := os.Create(logFile)
+
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err != nil {
+		log.Printf("failed creating file: %s", err)
+	}
+
 	defer func() {
 		numberOfBgProcesses = numberOfBgProcesses - 1
+
+		log.Println("Terminating goroutine")
+		wg.Done()
+		outputFile.Close()
 	}()
-	numberOfBgProcesses++
-	fmt.Println("Goroutine started")
-	args := strings.Fields(cmd)
-	command := exec.Command(args[0], args[1:]...)
+
 	command.Dir = dir
-	out, err := command.CombinedOutput()
+	command.Stdout = outputFile
+	command.Stderr = outputFile
+	log.Println("Goroutine started")
+
+	err = command.Run()
 	if err != nil {
-		fmt.Println("Error is ", err)
-		fmt.Printf("output is %s\n ", out)
-	} else {
-		fmt.Printf("output is %s\n ", out)
+		log.Println("command Run failed", err)
 	}
+	// pgid, err := syscall.Getpgid(command.Process.Pid)
+	// if err == nil {
+	// 	syscall.Kill(-pgid, 15) // note the minus sign
+	// }
+	data, err := ioutil.ReadFile(logFile)
+	if err != nil {
+		log.Printf("failed reading data from file: %s", err)
+	}
+	log.Printf("\n -------- %s ---------- \n %s \n ", logFile, data)
 }

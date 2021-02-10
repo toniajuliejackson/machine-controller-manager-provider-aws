@@ -128,8 +128,7 @@ func (c *Cluster) CheckEstablished() error {
 	*/
 
 	for i, crdCreatedName := range crdCreated {
-		fmt.Printf("%d Created CRD with given name %s, waiting till its established\n", i, crdCreatedName)
-
+		log.Printf("%d Created CRD with given name %s, waiting till its established\n", i, crdCreatedName)
 		err := wait.Poll(500*time.Millisecond, 60*time.Second, func() (bool, error) {
 			crd, err := c.apiextensionsClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crdCreatedName, metav1.GetOptions{})
 			if err != nil {
@@ -139,13 +138,13 @@ func (c *Cluster) CheckEstablished() error {
 				switch cond.Type {
 				case apiextensionsv1beta1.Established:
 					if cond.Status == apiextensionsv1beta1.ConditionTrue {
-						fmt.Printf("%d - %s, is established\n", i, crdCreatedName)
+						log.Printf("%d - %s, is established\n", i, crdCreatedName)
 						return true, err
 					}
 				case apiextensionsv1beta1.NamesAccepted:
 					if cond.Status == apiextensionsv1beta1.ConditionFalse {
-						fmt.Printf("Name conflict: %v\n", cond.Reason)
-						fmt.Printf("Naming Conflict with created CRD %s\n", crdCreatedName)
+						log.Printf("Name conflict: %v\n", cond.Reason)
+						log.Printf("Naming Conflict with created CRD %s\n", crdCreatedName)
 					}
 				}
 			}
