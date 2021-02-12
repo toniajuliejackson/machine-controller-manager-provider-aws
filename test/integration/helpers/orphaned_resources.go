@@ -10,7 +10,7 @@ func CheckForOrphanedResources(machineClass *v1alpha1.MachineClass, secret *v1.S
 	// Check for VM instances with matching tags/labels
 	// Describe volumes attached to VM instance & delete the volumes
 	// Finally delete the VM instance
-	err := DescribeInstancesWithTag("tag:mcmtest", "integration-test", machineClass, secret)
+	err := DescribeInstancesWithTag("tag:mcm-integration-test", "true", machineClass, secret)
 	if err != nil {
 		return err
 	}
