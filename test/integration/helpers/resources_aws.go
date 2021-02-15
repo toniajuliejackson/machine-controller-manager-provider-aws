@@ -16,6 +16,7 @@ package helpers
 **/
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,21 +27,38 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	v1 "k8s.io/api/core/v1"
 
+	providerDriver "github.com/gardener/machine-controller-manager-provider-aws/pkg/aws"
 	api "github.com/gardener/machine-controller-manager-provider-aws/pkg/aws/apis"
 	"github.com/gardener/machine-controller-manager-provider-aws/pkg/spi"
 	v1alpha1 "github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
+	"github.com/gardener/machine-controller-manager/pkg/util/provider/driver"
 )
 
 var _ aws.Config
 
 func newSession(machineClass *v1alpha1.MachineClass, secret *v1.Secret) *session.Session {
-
 	var (
 		providerSpec *api.AWSProviderSpec
 		sPI          spi.PluginSPIImpl
 	)
 
-	err := json.Unmarshal([]byte(machineClass.ProviderSpec.Raw), &providerSpec)
+	driverprovider := providerDriver.NewAWSDriver(&sPI)
+	machineList, err := driverprovider.ListMachines(context.TODO(), &driver.ListMachinesRequest{
+		MachineClass: machineClass,
+		Secret:       secret,
+	})
+	if err != nil {
+		log.Printf("\nError occured while listing machines %s", err)
+	} else if len(machineList.MachineList) == 0 {
+		fmt.Printf("\nNo machines are available.")
+	} else {
+		fmt.Printf("\nAvailable Machines: ")
+		for _, machine := range machineList.MachineList {
+			fmt.Printf("%s", machine)
+		}
+	}
+
+	err = json.Unmarshal([]byte(machineClass.ProviderSpec.Raw), &providerSpec)
 	if err != nil {
 		providerSpec = nil
 		log.Printf("Error occured while performing unmarshal %s", err.Error())
@@ -64,33 +82,33 @@ func DescribeInstancesWithTag(tagName string, tagValue string, machineClass *v1a
 					aws.String(tagValue),
 				},
 			},
+			{
+				Name: aws.String("instance-state-name"),
+				Values: []*string{
+					aws.String("running"),
+				},
+			},
 		},
 	}
 
 	result, err := svc.DescribeInstances(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			default:
-				return err.(awserr.Error)
+	checkAWSError(err)
+	if len(result.Reservations) == 0 {
+		fmt.Printf("\nNo instances are available.")
+	} else {
+		fmt.Printf("\nAvailable Instances: ")
+		for _, reservation := range result.Reservations {
+			for _, instance := range reservation.Instances {
+				fmt.Println(*instance.InstanceId)
+				// describe volumes attached to instance & delete them
+				//DescribeVolumesAttached(*instance.InstanceId)
+
+				// terminate the instance
+				//TerminateInstance(*instance.InstanceId)
 			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			return err
 		}
 	}
 
-	for _, reservation := range result.Reservations {
-		for _, instance := range reservation.Instances {
-			fmt.Println(*instance.InstanceId)
-			// describe volumes attached to instance & delete them
-			//DescribeVolumesAttached(*instance.InstanceId)
-
-			// terminate the instance
-			//TerminateInstance(*instance.InstanceId)
-		}
-	}
 	return nil
 }
 
@@ -104,25 +122,14 @@ func TerminateInstance(instanceID string) error {
 	}
 
 	result, err := svc.TerminateInstances(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			default:
-				return err.(awserr.Error)
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			return err
-		}
-	}
+	checkAWSError(err)
 
 	fmt.Println(result)
 	return nil
 }
 
 // DescribeAvailableVolumes describes volumes with the specified tag
-func DescribeAvailableVolumes(machineClass *v1alpha1.MachineClass, secret *v1.Secret) error {
+func DescribeAvailableVolumes(tagName string, tagValue string, machineClass *v1alpha1.MachineClass, secret *v1.Secret) error {
 	sess := newSession(machineClass, secret)
 	svc := ec2.New(sess)
 	input := &ec2.DescribeVolumesInput{
@@ -133,28 +140,23 @@ func DescribeAvailableVolumes(machineClass *v1alpha1.MachineClass, secret *v1.Se
 					aws.String("available"),
 				},
 			},
+			{
+				Name: aws.String(tagName),
+				Values: []*string{
+					aws.String(tagValue),
+				},
+			},
 		},
 	}
 
 	result, err := svc.DescribeVolumes(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			default:
-				return err.(awserr.Error)
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			return err
-		}
-	}
+	checkAWSError(err)
 
 	for _, volume := range result.Volumes {
-		fmt.Printf("available volume: %s\n", *volume.VolumeId)
+		fmt.Printf("%s", *volume.VolumeId)
 
 		// delete the volume
-		//DeleteVolume(*volume.VolumeId)
+		DeleteVolume(*volume.VolumeId)
 	}
 
 	return nil
@@ -181,18 +183,7 @@ func DescribeVolumesAttached(InstanceID string) error {
 	}
 
 	result, err := svc.DescribeVolumes(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			default:
-				return err.(awserr.Error)
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			return err
-		}
-	}
+	checkAWSError(err)
 
 	for _, volume := range result.Volumes {
 		fmt.Println(*volume.VolumeId)
@@ -214,6 +205,78 @@ func DeleteVolume(VolumeID string) error {
 	}
 
 	result, err := svc.DeleteVolume(input)
+	checkAWSError(err)
+	fmt.Println(result)
+	return nil
+}
+
+// AdditionalResourcesCheck describes VPCs and network interfaces
+func AdditionalResourcesCheck(tagName string, tagValue string) error {
+	// TO-DO: Checks for Network interfaces and VPCs
+	// If the command succeeds, no output is returned.
+	svc := ec2.New(session.New())
+	inputVPC := &ec2.DescribeVpcsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name: aws.String(tagName),
+				Values: []*string{
+					aws.String(tagValue),
+				},
+			},
+		},
+	}
+	resultVPC, err := svc.DescribeVpcs(inputVPC)
+	checkAWSError(err)
+
+	for _, vpc := range resultVPC.Vpcs {
+		fmt.Println(*vpc.VpcId)
+
+		inputNI := &ec2.DescribeNetworkInterfacesInput{
+			Filters: []*ec2.Filter{
+				{
+					Name: aws.String("vpc-id"),
+					Values: []*string{
+						aws.String(*vpc.VpcId),
+					},
+				},
+			},
+		}
+
+		resultDescribeNetworkInterface, err := svc.DescribeNetworkInterfaces(inputNI)
+		checkAWSError(err)
+
+		fmt.Println(resultDescribeNetworkInterface)
+
+		for _, networkinterface := range resultDescribeNetworkInterface.NetworkInterfaces {
+			fmt.Println(*networkinterface.Attachment.AttachmentId)
+			input := &ec2.DetachNetworkInterfaceInput{
+				AttachmentId: aws.String(*networkinterface.Attachment.AttachmentId),
+			}
+
+			resultDetachNetworkInterface, err := svc.DetachNetworkInterface(input)
+			checkAWSError(err)
+
+			fmt.Println(resultDetachNetworkInterface)
+		}
+
+		for _, networkinterfaceid := range resultDescribeNetworkInterface.NetworkInterfaces {
+			fmt.Println(*networkinterfaceid.NetworkInterfaceId)
+			input := &ec2.DeleteNetworkInterfaceInput{
+				NetworkInterfaceId: aws.String(*networkinterfaceid.NetworkInterfaceId),
+			}
+
+			resultDeleteNetworkInterface, err := svc.DeleteNetworkInterface(input)
+			checkAWSError(err)
+
+			fmt.Println(resultDeleteNetworkInterface)
+		}
+	}
+
+	fmt.Println(resultVPC)
+	return nil
+}
+
+func checkAWSError(err error) error {
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			switch aerr.Code() {
@@ -226,7 +289,5 @@ func DeleteVolume(VolumeID string) error {
 			return err
 		}
 	}
-
-	fmt.Println(result)
 	return nil
 }
