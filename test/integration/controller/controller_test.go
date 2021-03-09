@@ -12,7 +12,7 @@
 		- apply secret resource for accesing the cloud provider service in the control cluster
 		- Create machineclass resource from file available in kubernetes directory of provider specific repo in control cluster
 	AfterSuite
-		- To-Do : Delete the control and target clusters // As of now we are reusing the cluster
+		- Delete the control and target clusters // As of now we are reusing the cluster so this is not required
 
 	Test: differentRegion Scheduling Strategy Test
         1) Create machine in region other than where the target cluster exists. (e.g machine in eu-west-1 and target cluster exists in us-east-1)
@@ -45,13 +45,13 @@ import (
 
 	"github.com/gardener/machine-controller-manager-provider-aws/test/integration/helpers"
 	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/config"
 	. "github.com/onsi/gomega"
+	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 var (
-	cloudProviderSecret   = os.Getenv("cloudProviderSecret")
 	controlKubeConfigPath = os.Getenv("controlKubeconfig")
 	targetKubeConfigPath  = os.Getenv("targetKubeconfig")
 	controlKubeCluster    *helpers.Cluster
@@ -60,8 +60,11 @@ var (
 	mcmRepoPath           = "../../../dev/mcm"
 	ctx, cancelFunc       = context.WithCancel(context.Background())
 	wg                    sync.WaitGroup // prevents race condition between main and other goroutines exit
-	mcm_logFile           = "/tmp/integration-test-mcm.log"
-	mc_logFile            = "/tmp/integration-test-mc.log"
+	mcm_logFile           = filepath.Join(os.Getenv("TEST_DIR"), "integration-test-mcm.log")
+	mc_logFile            = filepath.Join(os.Getenv("TEST_DIR"), "integration-test-mc.log")
+	mcContainerImageTag   = os.Getenv("mcContainerImage")
+	mcmContainerImageTag  = os.Getenv("mcmContainerImage")
+	mcmDeploymentOrigObj  v1.Deployment
 )
 
 var _ = Describe("Integration test", func() {
@@ -70,27 +73,49 @@ var _ = Describe("Integration test", func() {
 		- Check and create crds ( machineclass, machines, machinesets and machinedeployment ) if required
 		  using file available in kubernetes/crds directory of machine-controller-manager repo
 		- Start the Machine Controller manager and machine controller (provider-specific)
-		- apply secret resource for accesing the cloud provider service in the control cluster
+		- Assume secret resource for accesing the cloud provider service in already in the control cluster
 		- Create machineclass resource from file available in kubernetes directory of provider specific repo in control cluster
 		*/
 		log.SetOutput(GinkgoWriter)
+
 		By("Checking for the clusters if provided are available")
 		Expect(prepareClusters()).To(BeNil())
-		By("Fetching kubernetes/crds and applying them into control cluster")
-		Expect(applyCrds()).To(BeNil())
-		By("Starting Machine Controller Manager")
-		Expect(startMachineControllerManager(ctx)).To(BeNil())
-		By("Starting Machine Controller")
-		Expect(startMachineController(ctx)).To(BeNil())
-		By("Parsing cloud-provider-secret file and applying")
-		Expect(applyCloudProviderSecret()).To(BeNil())
-		By("Applying MachineClass")
-		Expect(applyMachineClass()).To(BeNil())
-		config.DefaultReporterConfig.SlowSpecThreshold = float64(300 * time.Second)
+
+		if !controlKubeCluster.IsSeed(targetKubeCluster) {
+			By("Fetching kubernetes/crds and applying them into control cluster")
+			Expect(applyCrds()).To(BeNil())
+
+			By("Applying MachineClass")
+			Expect(applyMachineClass()).To(BeNil())
+		} else {
+			By("Creating dup MachineClass with delta yaml")
+			Expect(createDupMachineClass()).To(BeNil())
+		}
+
+		if len(mcContainerImageTag) != 0 || len(mcmContainerImageTag) != 0 {
+			/* - if any of mcmContainerImage  or mcContainerImageTag flag is non-empty then,
+			   create/update machinecontrollermanager deployment in the control-cluster with specified image
+			   - crds already exist in the cluster.
+			   TO-DO: try to look for crds in local kubernetes directory and apply them. this validates changes in crd structures (if any)
+			*/
+			By("Starting MCM Deployemnt")
+			Expect(initMcmDeployment()).To(BeNil())
+		} else {
+			/* 	- applyCrds from the mcm repo by cloning it and then
+			- as mcmContainerImage is empty, run mc and mcm locally
+			*/
+
+			By("Starting Machine Controller Manager")
+			Expect(startMachineControllerManager(ctx)).To(BeNil())
+			By("Starting Machine Controller")
+			Expect(startMachineController(ctx)).To(BeNil())
+		}
 	})
 	BeforeEach(func() {
-		By("Check the number of goroutines running are 2")
-		Expect(numberOfBgProcesses).To(BeEquivalentTo(2))
+		if !controlKubeCluster.IsSeed(targetKubeCluster) {
+			By("Check the number of goroutines running are 2")
+			Expect(numberOfBgProcesses).To(BeEquivalentTo(2))
+		}
 		// Nodes are healthy
 		By("Check nodes in target cluster are healthy")
 		Expect(targetKubeCluster.NumberOfReadyNodes()).To(BeEquivalentTo(targetKubeCluster.NumberOfNodes()))
@@ -165,7 +190,6 @@ var _ = Describe("Integration test", func() {
 				})
 			})
 		})
-
 	})
 	// Testcase #02 | Machine Deployment
 	Describe("Machine Deployment resource", func() {
@@ -187,8 +211,6 @@ var _ = Describe("Integration test", func() {
 		})
 		Context("Scale up to 6", func() {
 			It("Should not lead to any errors", func() {
-				// To-Do: Operation cannot be fulfilled on machinedeployments.machine.sapcloud.io "test-machine-deployment": the object has been modified; please apply your changes to the latest version and try again
-				// prevent above error by retries?
 
 				machineDployment, _ := controlKubeCluster.McmClient.MachineV1alpha1().MachineDeployments("default").Get("test-machine-deployment", metav1.GetOptions{})
 				machineDployment.Spec.Replicas = 6
@@ -317,25 +339,32 @@ var _ = Describe("Integration test", func() {
 			controlKubeCluster.McmClient.MachineV1alpha1().Machines("default").Delete("test1-machine1", &metav1.DeleteOptions{})
 		}
 		//<-time.After(3 * time.Second)
-		log.Println("Initiating gorouting cancel via context done")
+		if !controlKubeCluster.IsSeed(targetKubeCluster) {
+			log.Println("Initiating gorouting cancel via context done")
 
-		cancelFunc()
+			cancelFunc()
 
-		log.Println("Terminating processes")
-		wg.Wait()
-		log.Println("processes terminated")
+			log.Println("Terminating processes")
+			wg.Wait()
+			log.Println("processes terminated")
+		} else {
+			retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				// Retrieve the latest version of Deployment before attempting update
+				// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
+				_, updateErr := controlKubeCluster.Clientset.AppsV1().Deployments(mcmDeploymentOrigObj.Namespace).Update(&mcmDeploymentOrigObj)
+				return updateErr
+			})
+		}
 	})
 
 })
 
 func prepareClusters() error {
-	/* TO-DO: prepareClusters checks for
+	/* prepareClusters checks for
 	- the validity of controlKubeConfig and targetKubeConfig flags
-	- if required then creates the cluster using cloudProviderSecret
 	- It should return an error if thre is a error
 	*/
 
-	log.Printf("Secret is %s\n", cloudProviderSecret)
 	log.Printf("Control path is %s\n", controlKubeConfigPath)
 	log.Printf("Target path is %s\n", targetKubeConfigPath)
 	if controlKubeConfigPath != "" {
@@ -371,12 +400,6 @@ func prepareClusters() error {
 		}
 	} else if targetKubeConfigPath != "" {
 		return fmt.Errorf("controlKubeconfig path is mandatory if using targetKubeConfigPath. Aborting!!!")
-	} else if cloudProviderSecret != "" {
-		cloudProviderSecret, _ = filepath.Abs(cloudProviderSecret)
-		// TO-DO: validate cloudProviderSecret yaml file and Create cluster using the secrets in it.
-		// Also set controlKubeCluster and targetKubeCluster
-	} else {
-		return fmt.Errorf("missing mandatory flag cloudProviderSecret. Aborting!!!")
 	}
 	return nil
 }
@@ -404,9 +427,7 @@ func applyCrds() error {
 
 func startMachineControllerManager(ctx context.Context) error {
 	/*
-		 TO-DO: startMachineControllerManager starts the machine controller manager
-			 - if mcmContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
-			 - if mcmContainerImage is empty, runs machine controller manager locally
+		startMachineControllerManager starts the machine controller manager
 				 clone the required repo and then use make
 	*/
 	command := fmt.Sprintf("make start CONTROL_KUBECONFIG=%s TARGET_KUBECONFIG=%s", controlKubeConfigPath, targetKubeConfigPath)
@@ -449,7 +470,7 @@ func startMachineControllerManager(ctx context.Context) error {
 
 func startMachineController(ctx context.Context) error {
 	/*
-		 TO-DO: startMachineController starts the machine controller
+		 startMachineController starts the machine controller
 			 - if mcContainerImage flag is non-empty then, start a pod in the control-cluster with specified image
 			 - if mcContainerImage is empty, runs machine controller locally
 	*/
@@ -460,38 +481,78 @@ func startMachineController(ctx context.Context) error {
 	return nil
 }
 
-func applyCloudProviderSecret() error {
-	/* TO-DO: applyCloudProviderSecret
-	- load the yaml file
-	- check if there is a  secret alredy with the same name in the controlCluster then validate for using it to interact with the hyperscaler
-	- create the secret if not existing
+func initMcmDeployment() error {
+	/*
+		- if any of mcmContainerImage  or mcContainerImageTag flag is non-empty then,
+			update machinecontrollermanager deployment in the control-cluster with specified image
+		-
 	*/
-	return nil
+	namespace, _ := targetKubeCluster.ClusterName()
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Retrieve the latest version of Deployment before attempting update
+		// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
+		result, getErr := controlKubeCluster.Clientset.AppsV1().Deployments(namespace).Get("machine-controller-manager", metav1.GetOptions{})
+		if getErr != nil {
+			panic(fmt.Errorf("Failed to get latest version of Deployment: %v", getErr))
+		}
+		mcmDeploymentOrigObj = *result
+		for i := range result.Spec.Template.Spec.Containers {
+			if result.Spec.Template.Spec.Containers[i].Name == "machine-controller-manager" {
+				if len(mcmContainerImageTag) != 0 {
+					result.Spec.Template.Spec.Containers[i].Image = "eu.gcr.io/gardener-project/gardener/machine-controller-manager:" + mcmContainerImageTag
+				}
+			} else if result.Spec.Template.Spec.Containers[i].Name == "machine-controller" {
+				if len(mcContainerImageTag) != 0 {
+					result.Spec.Template.Spec.Containers[i].Image = "eu.gcr.io/gardener-project/gardener/machine-controller-manager-provider-aws:" + mcContainerImageTag
+				}
+			}
+		}
+		_, updateErr := controlKubeCluster.Clientset.AppsV1().Deployments(namespace).Update(result)
+		return updateErr
+	})
+	if retryErr != nil {
+		return retryErr
+	} else {
+		return nil
+	}
 }
 
 func applyMachineClass() error {
-	/* TO-DO: applyMachineClass
-	- (Check if it control cluster is a seed cluster and if so, use machineclass from cluster )
-		Try to retrieve the cluster-name (clusters[0].name) from the target kubeconfig passed in.
-		Check if there is any cluster resource available ( means it is a seed cluster ) and see if there is any cluster with name same as to target cluster-name
-
-		kubectl get clusters -A
-		NAME                             AGE
-		shoot--dev--ash-shoot-06022021   46h
-
-		If so, retrieve the namespace of this cluster resource.
-		probe for machine-class in the identified namespace and then creae a copy of this machine-class with additional tag (providerSpec.tags)  \"mcm-integration-test: "true"\"
-		the namespace of the new machine-class should be default
-
-	- (if not use machine-class.yaml file)
-		look for a file available in kubernetes directory of provider specific repo and then use it instead for creating machine class
+	/*
+		- if isControlClusterIsShootsSeed is true, then use machineclass from cluster
+			probe for machine-class in the identified namespace and then creae a copy of this machine-class with additional delta available in machineclass-delta.yaml ( eg. tag (providerSpec.tags)  \"mcm-integration-test: "true"\" )
+			 --- (Obsolete ?) ---> the namespace of the new machine-class should be default
+		- (if not use machine-class.yaml file)
+			look for a file available in kubernetes directory of provider specific repo and then use it instead for creating machine class
 	*/
-	applyMC := "../../../kubernetes/machine-class.yaml"
+	if !controlKubeCluster.IsSeed(targetKubeCluster) {
+		applyMC := "../../../kubernetes/machine-class.yaml"
 
-	err := applyFiles(applyMC)
-	if err != nil {
-		return err
+		err := applyFiles(applyMC)
+		if err != nil {
+			return err
+		}
+		return nil
+	} else {
+		namespace, _ := targetKubeCluster.ClusterName()
+		machineClasses, err := controlKubeCluster.McmClient.MachineV1alpha1().MachineClasses(namespace).List(metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+
+		for _, machineClass := range machineClasses.Items {
+			machineClass.GetName()
+			// To-DO: Update machine and machinedeployment resource yaml files to contain spec.class.name = machineClass. machineClass.GetName()
+		}
+		return nil
 	}
+}
+
+func createDupMachineClass() error {
+	/* TO-DO: createDupMachineClass
+	This will read the control cluster machineclass resource and creates a duplicate of it
+	it will additionally add the delta part found in machineclass yaml file
+	*/
 	return nil
 }
 
@@ -553,6 +614,7 @@ func execCommandAsRoutine(ctx context.Context, cmd string, dir string, logFile s
 	defer func() {
 		numberOfBgProcesses = numberOfBgProcesses - 1
 		outputFile.Close()
+		command.Process.Signal(os.Interrupt)
 		wg.Done()
 	}()
 
