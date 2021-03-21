@@ -5,3 +5,7 @@ cmi-plugin
 *coverprofile.out*
 bin/
 .idea
+dev/
+.test
+test/integration/controller/report*
+.vscode
